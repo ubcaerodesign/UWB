@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UWB Anchor View</title>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f4f5f7; --text: #1c1e21; --muted: #6b7280;
+    --border: #d9dce1; --grid: #e6e8ec; --accent: #2563eb; --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1d2026; --text: #e7e9ee; --muted: #9aa1ad;
+      --border: #333843; --grid: #272b33; --accent: #60a5fa; --warn: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+           padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  button, select, input { font: inherit; color: var(--text); background: var(--bg);
+           border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  label { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+  #status { margin-left: auto; color: var(--muted); }
+  main { display: grid; grid-template-columns: 1fr 340px; gap: 12px; padding: 12px 16px;
+         height: calc(100vh - 56px); }
+  #stage { position: relative; min-height: 300px; border: 1px solid var(--border);
+           border-radius: 8px; overflow: hidden; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  aside { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+               color: var(--muted); margin: 0 0 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; }
+  td, th { padding: 3px 4px; }
+  td input { width: 62px; padding: 3px 5px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  #warn { color: var(--warn); min-height: 1.2em; }
+  #log { margin: 0; max-height: 110px; overflow: auto; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+  .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  .pairrow { display: flex; justify-content: space-between; align-items: center; margin: 3px 0; color: var(--text); }
+  .pairrow input { width: 90px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } #stage { height: 55vh; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>UWB Anchor View</h1>
+  <button id="btnConnect" class="primary">Connect</button>
+  <button id="btnTest" disabled>Send TEST</button>
+  <button id="btnDemo">Demo</button>
+  <label>Baud
+    <select id="baud"><option>9600</option><option>115200</option></select>
+  </label>
+  <label>Median window <input id="win" type="number" min="1" max="100" value="5" style="width:60px"></label>
+  <label><input id="autoTest" type="checkbox" checked> auto-send TEST</label>
+  <button id="btnClear">Clear trail</button>
+  <span id="status">Not connected</span>
+</header>
+
+<main>
+  <div id="stage"><canvas id="cv"></canvas></div>
+
+  <aside>
+    <section>
+      <h2>Anchor (solved)</h2>
+      <div class="mono" id="anchorXY">–</div>
+      <div class="mono" id="rms" style="color:var(--muted)">fit RMS –</div>
+      <div id="warn"></div>
+    </section>
+
+    <section>
+      <h2>Tag-to-tag distances (cm), measured between the tags</h2>
+      <div id="distInputs"></div>
+      <p class="note" id="layoutNote"></p>
+    </section>
+
+    <section>
+      <h2>Tags (layout computed from those distances)</h2>
+      <table id="tagTable">
+        <thead><tr><th>Tag</th><th>x</th><th>y</th><th>dist</th><th>angle</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="note">Angle is from the anchor to the tag, counter-clockwise from +X of this frame. It is not the anchor's heading.</p>
+    </section>
+
+    <section>
+      <h2>Send command</h2>
+      <div style="display:flex; gap:6px">
+        <input id="cmd" placeholder="e.g. SETUP ANCHOR" style="flex:1" disabled>
+        <button id="btnSend" disabled>Send</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Other serial output</h2>
+      <pre id="log"></pre>
+    </section>
+  </aside>
+</main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- config
+const TAGS = ["02", "03", "05", "06"];                 // match tagNum1..4 in the sketch
+const COLORS = ["#2563eb", "#f59e0b", "#16a34a", "#dc2626"];
+// Tag-to-tag distances in cm, keyed "a-b" in TAGS order. Placeholder values: a 100 x 60 cm rectangle.
+const PAIRS = [];
+for (let i = 0; i < TAGS.length; i++) for (let j = i + 1; j < TAGS.length; j++) PAIRS.push([i, j]);
+const DEFAULT_DIST = { "02-03": 100, "02-05": 116.62, "02-06": 60, "03-05": 60, "03-06": 116.62, "05-06": 100 };
+const LINE_RE = /^\s*(\d{2}),(\d+)\s*$/;
+
+// ---------------------------------------------------------------- state
+let tagDist = loadDist();
+let pos = {};          // tag -> [x, y] in cm, computed from the tag-to-tag distances
+let layoutErr = 0;     // RMS mismatch between the entered distances and the computed layout
+const hist = Object.fromEntries(TAGS.map(t => [t, []]));
+const trail = [];
+let port = null, reader = null, writer = null, closedPromise = null, connected = false;
+let demoTimer = null;
+let latest = null;   // {x, y, rms, ok, dists, angles}
+
+const $ = id => document.getElementById(id);
+
+function loadDist() {
+  try {
+    const s = JSON.parse(localStorage.getItem("uwbTagDist"));
+    if (s && PAIRS.every(([i, j]) => typeof s[`${TAGS[i]}-${TAGS[j]}`] === "number")) return s;
+  } catch (e) {}
+  return Object.assign({}, DEFAULT_DIST);
+}
+function saveDist() { try { localStorage.setItem("uwbTagDist", JSON.stringify(tagDist)); } catch (e) {} }
+
+// ---------------------------------------------------------------- layout from tag-to-tag distances
+// Eigen-decomposition of a small symmetric matrix (Jacobi rotations).
+function jacobiEigen(M) {
+  const n = M.length;
+  const A = M.map(r => r.slice());
+  const V = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+  for (let sweep = 0; sweep < 60; sweep++) {
+    let off = 0;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) off += A[i][j] ** 2;
+    if (off < 1e-18) break;
+    for (let p = 0; p < n - 1; p++) for (let q = p + 1; q < n; q++) {
+      if (Math.abs(A[p][q]) < 1e-300) continue;
+      const theta = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+      const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      for (let k = 0; k < n; k++) { const a = A[k][p], b = A[k][q]; A[k][p] = c * a - s * b; A[k][q] = s * a + c * b; }
+      for (let k = 0; k < n; k++) { const a = A[p][k], b = A[q][k]; A[p][k] = c * a - s * b; A[q][k] = s * a + c * b; }
+      for (let k = 0; k < n; k++) { const a = V[k][p], b = V[k][q]; V[k][p] = c * a - s * b; V[k][q] = s * a + c * b; }
+    }
+  }
+  return { values: A.map((r, i) => r[i]), vectors: V };   // eigenvectors are the columns of V
+}
+
+// Classical multidimensional scaling: pairwise distances -> 2D coordinates.
+function embed(D) {
+  const n = D.length;
+  const D2 = D.map(r => r.map(v => v * v));
+  const rowMean = D2.map(r => r.reduce((a, b) => a + b, 0) / n);
+  const total = rowMean.reduce((a, b) => a + b, 0) / n;
+  const B = D2.map((r, i) => r.map((v, j) => -0.5 * (v - rowMean[i] - rowMean[j] + total)));
+  const { values, vectors } = jacobiEigen(B);
+  const order = values.map((_, i) => i).sort((a, b) => values[b] - values[a]);
+  const pts = Array.from({ length: n }, () => [0, 0]);
+  for (let k = 0; k < 2; k++) {
+    const i = order[k], sq = Math.sqrt(Math.max(values[i], 0));
+    for (let r = 0; r < n; r++) pts[r][k] = vectors[r][i] * sq;
+  }
+  return pts;
+}
+
+function rebuildLayout() {
+  const n = TAGS.length;
+  const D = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (const [i, j] of PAIRS) D[i][j] = D[j][i] = tagDist[`${TAGS[i]}-${TAGS[j]}`] || 0;
+  let pts = embed(D);
+  // Fix the arbitrary rotation/mirror: first tag at the origin, second tag on +X, third tag above the X axis.
+  const [ox, oy] = pts[0];
+  pts = pts.map(([x, y]) => [x - ox, y - oy]);
+  const a = Math.atan2(pts[1][1], pts[1][0]), ca = Math.cos(-a), sa = Math.sin(-a);
+  pts = pts.map(([x, y]) => [x * ca - y * sa, x * sa + y * ca]);
+  const off = pts.find((p, k) => k > 1 && Math.abs(p[1]) > 1e-6);
+  if (off && off[1] < 0) pts = pts.map(([x, y]) => [x, -y]);
+  TAGS.forEach((t, k) => { pos[t] = pts[k]; });
+  let sq = 0;
+  for (const [i, j] of PAIRS) sq += (Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) - D[i][j]) ** 2;
+  layoutErr = Math.sqrt(sq / PAIRS.length);
+}
+
+// ---------------------------------------------------------------- solver
+// Least-squares multilateration: find the anchor (x,y) from ranges to tags at known positions.
+function solve(P, d) {
+  const n = P.length;
+  let a00 = 0, a01 = 0, a11 = 0, b0 = 0, b1 = 0;
+  for (let i = 1; i < n; i++) {
+    const ax = 2 * (P[i][0] - P[0][0]), ay = 2 * (P[i][1] - P[0][1]);
+    const b = d[0] ** 2 - d[i] ** 2 + P[i][0] ** 2 + P[i][1] ** 2 - P[0][0] ** 2 - P[0][1] ** 2;
+    a00 += ax * ax; a01 += ax * ay; a11 += ay * ay; b0 += ax * b; b1 += ay * b;
+  }
+  let det = a00 * a11 - a01 * a01;
+  const scale = a00 + a11;
+  if (!(det / (scale * scale) > 1e-6)) return null;     // tags collinear / degenerate
+  let x = (a11 * b0 - a01 * b1) / det;
+  let y = (-a01 * b0 + a00 * b1) / det;
+
+  // Gauss-Newton refinement on the true range residuals
+  for (let it = 0; it < 15; it++) {
+    let j00 = 0, j01 = 0, j11 = 0, g0 = 0, g1 = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = x - P[i][0], dy = y - P[i][1];
+      const r = Math.max(Math.hypot(dx, dy), 1e-6);
+      const jx = dx / r, jy = dy / r, res = r - d[i];
+      j00 += jx * jx; j01 += jx * jy; j11 += jy * jy;
+      g0 += jx * -res; g1 += jy * -res;
+    }
+    det = j00 * j11 - j01 * j01;
+    if (Math.abs(det) < 1e-12) break;
+    const sx = (j11 * g0 - j01 * g1) / det;
+    const sy = (-j01 * g0 + j00 * g1) / det;
+    x += sx; y += sy;
+    if (Math.hypot(sx, sy) < 1e-4) break;
+  }
+  let sq = 0;
+  for (let i = 0; i < n; i++) sq += (Math.hypot(x - P[i][0], y - P[i][1]) - d[i]) ** 2;
+  return { x, y, rms: Math.sqrt(sq / n) };
+}
+
+const median = arr => {
+  const s = [...arr].sort((a, b) => a - b), m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+const bearing = (ax, ay, tx, ty) => ((Math.atan2(ty - ay, tx - ax) * 180 / Math.PI) + 360) % 360;
+
+function recompute() {
+  if (TAGS.some(t => hist[t].length === 0)) return;
+  const w = Math.max(1, +$("win").value || 5);
+  const dists = TAGS.map(t => median(hist[t].slice(-w)));
+  const P = TAGS.map(t => pos[t]);
+  const sol = solve(P, dists);
+  if (!sol) { latest = { ok: false, dists }; return; }
+  const angles = TAGS.map((t, i) => bearing(sol.x, sol.y, P[i][0], P[i][1]));
+  latest = { ok: true, x: sol.x, y: sol.y, rms: sol.rms, dists, angles };
+  trail.push([sol.x, sol.y]);
+  if (trail.length > 150) trail.shift();
+}
+
+// ---------------------------------------------------------------- input handling
+function handleLine(raw) {
+  const m = LINE_RE.exec(raw);
+  if (!m) {
+    if (raw.trim()) {
+      const log = $("log");
+      log.textContent = (log.textContent + raw.trim() + "\n").split("\n").slice(-30).join("\n");
+      log.scrollTop = log.scrollHeight;
+      if (/Test Complete/i.test(raw)) setStatus("Test complete (1000 rounds). Press Send TEST for more.");
+    }
+    return;
+  }
+  pushSample(m[1], parseInt(m[2], 10));
+}
+function pushSample(tag, dist) {
+  if (!hist[tag]) return;
+  const h = hist[tag];
+  h.push(dist);
+  if (h.length > 200) h.shift();
+  if (tag === TAGS[TAGS.length - 1]) recompute();      // tags arrive in order; recompute once per round
+}
+
+// ---------------------------------------------------------------- Web Serial
+async function connect() {
+  if (!("serial" in navigator)) {
+    setStatus("Web Serial not supported. Use Chrome or Edge.");
+    return;
+  }
+  try {
+    stopDemo();
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: +$("baud").value });
+  } catch (e) {
+    setStatus("Could not open port: " + e.message);
+    port = null;
+    return;
+  }
+  connected = true;
+  setUI(true);
+  setStatus("Connected. Waiting for data...");
+
+  const dec = new TextDecoderStream();
+  closedPromise = port.readable.pipeTo(dec.writable).catch(() => {});
+  reader = dec.readable.getReader();
+  writer = port.writable.getWriter();
+
+  if ($("autoTest").checked) setTimeout(() => { if (connected) send("TEST"); }, 2000);  // ESP32 may reset on open
+
+  let buf = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        handleLine(buf.slice(0, i));
+        buf = buf.slice(i + 1);
+      }
+    }
+  } catch (e) {
+    setStatus("Read error: " + e.message);
+  }
+  await disconnect();
+}
+
+async function disconnect() {
+  if (!port) return;
+  connected = false;
+  try { await reader.cancel(); } catch (e) {}
+  try { await closedPromise; } catch (e) {}
+  try { writer.releaseLock(); } catch (e) {}
+  try { await port.close(); } catch (e) {}
+  port = reader = writer = null;
+  setUI(false);
+  setStatus("Disconnected");
+}
+
+async function send(text) {
+  if (!writer) return;
+  try { await writer.write(new TextEncoder().encode(text + "\n")); setStatus("Sent: " + text); }
+  catch (e) { setStatus("Send failed: " + e.message); }
+}
+
+// ---------------------------------------------------------------- demo
+function startDemo() {
+  const t0 = performance.now();
+  demoTimer = setInterval(() => {
+    const s = (performance.now() - t0) / 1000;
+    const ax = 60 + 40 * Math.cos(s * 0.4), ay = -80 + 25 * Math.sin(s * 0.4);
+    for (const t of TAGS) {
+      const d = Math.hypot(pos[t][0] - ax, pos[t][1] - ay);
+      pushSample(t, Math.max(0, Math.round(d + (Math.random() + Math.random() + Math.random() - 1.5) * 8)));
+    }
+  }, 60);
+  $("btnDemo").textContent = "Stop demo";
+  setStatus("Demo running (simulated anchor)");
+}
+function stopDemo() {
+  if (demoTimer) { clearInterval(demoTimer); demoTimer = null; }
+  $("btnDemo").textContent = "Demo";
+}
+
+// ---------------------------------------------------------------- UI
+function setStatus(s) { $("status").textContent = s; }
+function setUI(on) {
+  $("btnConnect").textContent = on ? "Disconnect" : "Connect";
+  $("btnConnect").classList.toggle("primary", !on);
+  $("btnTest").disabled = !on;
+  $("cmd").disabled = !on;
+  $("btnSend").disabled = !on;
+}
+
+$("btnConnect").onclick = () => connected ? disconnect() : connect();
+$("btnTest").onclick = () => send("TEST");
+$("btnSend").onclick = () => { const v = $("cmd").value.trim(); if (v) { send(v); $("cmd").value = ""; } };
+$("cmd").onkeydown = e => { if (e.key === "Enter") $("btnSend").click(); };
+$("btnDemo").onclick = () => demoTimer ? stopDemo() : (connected ? setStatus("Disconnect first") : startDemo());
+$("btnClear").onclick = () => { trail.length = 0; TAGS.forEach(t => hist[t].length = 0); latest = null; };
+
+rebuildLayout();
+const tbody = document.querySelector("#tagTable tbody");
+TAGS.forEach((t, i) => {
+  const tr = document.createElement("tr");
+  tr.innerHTML =
+    `<td><span class="sw" style="background:${COLORS[i]}"></span>${t}</td>` +
+    `<td class="mono" id="x-${t}">–</td><td class="mono" id="y-${t}">–</td>` +
+    `<td class="mono" id="d-${t}">–</td><td class="mono" id="a-${t}">–</td>`;
+  tbody.appendChild(tr);
+});
+const distBox = $("distInputs");
+PAIRS.forEach(([i, j]) => {
+  const key = `${TAGS[i]}-${TAGS[j]}`;
+  const row = document.createElement("label");
+  row.className = "pairrow";
+  row.innerHTML = `<span>Tag ${TAGS[i]} ↔ Tag ${TAGS[j]}</span><input type="number" step="any" min="0" data-key="${key}" value="${tagDist[key]}">`;
+  distBox.appendChild(row);
+});
+distBox.addEventListener("input", e => {
+  const k = e.target.dataset.key;
+  if (!k) return;
+  tagDist[k] = Math.max(0, parseFloat(e.target.value) || 0);
+  saveDist(); rebuildLayout(); trail.length = 0; recompute();
+});
+
+function updateReadouts() {
+  const fmt = v => (Math.abs(v) < 0.05 ? 0 : v).toFixed(1);     // avoid showing "-0.0" from float noise
+  TAGS.forEach(t => { $("x-" + t).textContent = fmt(pos[t][0]); $("y-" + t).textContent = fmt(pos[t][1]); });
+  $("layoutNote").textContent = "Layout fit error: " + layoutErr.toFixed(1) + " cm RMS" +
+    (layoutErr > 3 ? " (the distances don't fit a flat layout well: re-check them, or the tags may be at different heights)" : "");
+  if (!latest) return;
+  $("warn").textContent = latest.ok ? "" : "Tags are collinear: can't solve. Check the tag distances.";
+  TAGS.forEach((t, i) => {
+    $("d-" + t).textContent = latest.dists[i].toFixed(0) + " cm";
+    $("a-" + t).textContent = latest.ok ? latest.angles[i].toFixed(1) + "°" : "–";
+  });
+  if (latest.ok) {
+    $("anchorXY").textContent = `x ${latest.x.toFixed(1)}, y ${latest.y.toFixed(1)} cm`;
+    $("rms").textContent = `fit RMS ${latest.rms.toFixed(1)} cm`;
+  }
+}
+
+// ---------------------------------------------------------------- drawing
+const cv = $("cv"), ctx = cv.getContext("2d");
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+function niceStep(range) {
+  const raw = range / 6, mag = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / mag;
+  return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * mag;
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // view bounds from tags + anchor
+  const xs = TAGS.map(t => pos[t][0]), ys = TAGS.map(t => pos[t][1]);
+  if (latest && latest.ok) { xs.push(latest.x); ys.push(latest.y); }
+  let minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = Math.max(30, 0.25 * Math.max(maxX - minX, maxY - minY));
+  minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+  const s = Math.min(W / (maxX - minX), H / (maxY - minY));
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const X = x => (x - cx) * s + W / 2, Y = y => H / 2 - (y - cy) * s;
+
+  // grid
+  const step = niceStep(Math.max(W, H) / s);
+  ctx.lineWidth = 1; ctx.strokeStyle = css("--grid"); ctx.fillStyle = css("--muted");
+  ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+  const gx0 = Math.floor((cx - W / 2 / s) / step) * step, gx1 = cx + W / 2 / s;
+  const gy0 = Math.floor((cy - H / 2 / s) / step) * step, gy1 = cy + H / 2 / s;
+  for (let x = gx0; x <= gx1; x += step) { ctx.beginPath(); ctx.moveTo(X(x), 0); ctx.lineTo(X(x), H); ctx.stroke(); ctx.fillText(Math.round(x * 100) / 100, X(x) + 3, 3); }
+  for (let y = gy0; y <= gy1; y += step) { ctx.beginPath(); ctx.moveTo(0, Y(y)); ctx.lineTo(W, Y(y)); ctx.stroke(); ctx.fillText(Math.round(y * 100) / 100 + " cm", 3, Y(y) + 3); }
+
+  // range circles
+  if (latest) {
+    TAGS.forEach((t, i) => {
+      ctx.strokeStyle = COLORS[i]; ctx.globalAlpha = 0.35; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(X(pos[t][0]), Y(pos[t][1]), latest.dists[i] * s, 0, 2 * Math.PI); ctx.stroke();
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  // anchor trail
+  if (trail.length > 1) {
+    ctx.strokeStyle = css("--text"); ctx.globalAlpha = 0.25; ctx.lineWidth = 1.5;
+    ctx.beginPath(); trail.forEach(([x, y], k) => k ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // lines + angle labels
+  if (latest && latest.ok) {
+    TAGS.forEach((t, i) => {
+      const ax = X(latest.x), ay = Y(latest.y), tx = X(pos[t][0]), ty = Y(pos[t][1]);
+      ctx.strokeStyle = COLORS[i]; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(tx, ty); ctx.stroke();
+      const label = latest.angles[i].toFixed(0) + "°", mx = (ax + tx) / 2, my = (ay + ty) / 2;
+      ctx.font = "bold 12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const w = ctx.measureText(label).width + 8;
+      ctx.fillStyle = css("--bg"); ctx.globalAlpha = 0.85; ctx.fillRect(mx - w / 2, my - 9, w, 18); ctx.globalAlpha = 1;
+      ctx.fillStyle = COLORS[i]; ctx.fillText(label, mx, my);
+    });
+    // anchor
+    ctx.fillStyle = css("--text"); ctx.beginPath(); ctx.arc(X(latest.x), Y(latest.y), 8, 0, 2 * Math.PI); ctx.fill();
+    ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+    ctx.fillText("ANCHOR", X(latest.x) + 12, Y(latest.y) - 6);
+  }
+
+  // tags
+  TAGS.forEach((t, i) => {
+    const x = X(pos[t][0]), y = Y(pos[t][1]);
+    ctx.fillStyle = COLORS[i]; ctx.fillRect(x - 7, y - 7, 14, 14);
+    ctx.fillStyle = css("--text"); ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+    ctx.fillText("Tag " + t, x + 10, y - 8);
+  });
+
+  if (!latest) {
+    ctx.fillStyle = css("--muted"); ctx.font = "14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("Waiting for data from all 4 tags... (or press Demo)", W / 2, H / 2);
+  }
+}
+
+function frame() { updateReadouts(); draw(); requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+
+if (!("serial" in navigator)) setStatus("Web Serial not available: use Chrome or Edge (Demo still works)");
+</script>
+</body>
+</html>
