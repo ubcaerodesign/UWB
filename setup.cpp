@@ -1,12 +1,12 @@
 #include <Arduino.h>
 #include <math.h>
 
-const String anchorNum = "04"; //module numeber 01-07
+const String anchorNum = "04"; //module number 01-07
 
-const String tagNum1 = "02"; //module numeber 01-07
-const String tagNum2 = "03"; //module numeber 01-07
-const String tagNum3 = "05"; //module numeber 01-07
-const String tagNum4 = "06"; //module numeber 01-07
+const String tagNum1 = "02"; //module number 01-07
+const String tagNum2 = "03"; //module number 01-07
+const String tagNum3 = "05"; //module number 01-07
+const String tagNum4 = "06"; //module number 01-07
 
 const int Cal1 = -39;
 const int Cal2 = -37;
@@ -188,7 +188,10 @@ void ResetESP32(){
 
 void Test(){
 
+  Serial2.print("AT+MODE=1\r\n");
+  delay(200);
   Serial2.print("AT+CAL=+50\r\n");
+  delay(200);
 
   String tags[4] = {tagNum1, tagNum2, tagNum3, tagNum4};
   int cal[4] = {Cal1, Cal2, Cal3, Cal4};
@@ -198,32 +201,36 @@ void Test(){
     for (int t = 0; t < 4; t++) {
 
       String command = "AT+ANCHOR_SEND=DESIGN" + tags[t] + ",4,TEST";
-      Serial2.print(command + "\r\n");
+      int datapoint = 0;
+      bool gotRange = false;
 
-      unsigned long startTime = millis();
-      String response;
-      while (millis() - startTime < 1000 &&
-             response.indexOf("+ANCHOR_RCV=") == -1) {
-        if (Serial2.available() > 0) {
-          response += Serial2.readString();
-        } else {
-          delay(2);
+      while (!gotRange) {
+        String response;
+        Serial2.print(command + "\r\n");
+
+        unsigned long startTime = millis();
+        while (millis() - startTime < 1000 &&
+               response.indexOf("+ANCHOR_RCV=") == -1) {
+          if (Serial2.available() > 0) {
+            response += Serial2.readString();
+          } else {
+            delay(2);
+          }
         }
+
+        int receiveIndex = response.indexOf("+ANCHOR_RCV=");
+        int cmIndex = response.indexOf(" cm", receiveIndex);
+        int lastComma = response.lastIndexOf(',', cmIndex);
+
+        if (receiveIndex != -1 && cmIndex != -1 && lastComma != -1) {
+          String numStr = response.substring(lastComma + 1, cmIndex);
+          datapoint = numStr.toInt();
+          gotRange = true;
+        }
+
+        if (!gotRange) delay(100);
       }
 
-      int receiveIndex = response.indexOf("+ANCHOR_RCV=");
-      int cmIndex = response.indexOf(" cm", receiveIndex);
-      int lastComma = response.lastIndexOf(',', cmIndex);
-
-      if (receiveIndex == -1 || cmIndex == -1 || lastComma == -1) {
-        Serial.printf("No valid range response from tag %s within 1000 ms. Module response: %s\n",
-                      tags[t].c_str(), response.c_str());
-        return;
-      }
-
-      String numStr = response.substring(lastComma + 1, cmIndex);
-      int datapoint = numStr.toInt();
-      
       Serial.printf("%s,%d\n", tags[t].c_str(), max(datapoint + cal[t], 0)); 
     }
   }
