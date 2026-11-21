@@ -1,19 +1,19 @@
 #include <Arduino.h>
 #include <math.h>
 
-const String anchorNum = "01"; //module numeber 01-07
+const String anchorNum = "04"; //module numeber 01-07
 
-const String tagNum1 = "03"; //module numeber 01-07
-const String tagNum2 = "02"; //module numeber 01-07
-const String tagNum3 = "03"; //module numeber 01-07
-const String tagNum4 = "05"; //module numeber 01-07
+const String tagNum1 = "02"; //module numeber 01-07
+const String tagNum2 = "03"; //module numeber 01-07
+const String tagNum3 = "05"; //module numeber 01-07
+const String tagNum4 = "06"; //module numeber 01-07
 
-const int Cal1 = -44;
-const int Cal2 = -59;
-const int Cal3 = -41;
-const int Cal4 = -53;
+const int Cal1 = -39;
+const int Cal2 = -37;
+const int Cal3 = -40;
+const int Cal4 = -39;
 
-const int trueDistance = 13; //distance in cm
+const int trueDistance = 14; //distance in cm
 const int dataSize = 1000;
 
 const int RXp2 = 16;
@@ -190,53 +190,41 @@ void Test(){
 
   Serial2.print("AT+CAL=+50\r\n");
 
-  // 1. Group the tags into an array for sequential polling
   String tags[4] = {tagNum1, tagNum2, tagNum3, tagNum4};
   int cal[4] = {Cal1, Cal2, Cal3, Cal4};
 
   for (int i = 0; i < dataSize; i++) {
     
-    // 2. Inner loop iterates through each of the 4 tags
     for (int t = 0; t < 4; t++) {
-      
-      while(Serial2.available()) Serial2.read();
 
       String command = "AT+ANCHOR_SEND=DESIGN" + tags[t] + ",4,TEST";
       Serial2.print(command + "\r\n");
 
       unsigned long startTime = millis();
-      while (Serial2.available() == 0 && millis() - startTime < 1000) {
-        delay(2); // Reduced from 10 for faster serial polling
-      }
-
-      if (Serial2.available() > 0) {
-        String response = Serial2.readString();
-      
-        if (response.indexOf("+ANCHOR_RCV=") != -1) {
-          int lastComma = response.lastIndexOf(',');
-          int cmIndex = response.indexOf(" cm");
-
-          if (lastComma != -1 && cmIndex != -1) {
-            String numStr = response.substring(lastComma + 1, cmIndex);
-            int datapoint = numStr.toInt();
-            
-            // 3. Print in strict CSV format (e.g., "07,125") for Python/Excel
-            // Note: .c_str() is required to print Arduino Strings with %s
-            Serial.printf("%s,%d\n", tags[t].c_str(), max(datapoint + cal[t], 0)); 
-          } 
-          else {
-            t = t - 1; // String malformed, retry this specific tag
-          }
-        } 
-        else {
-          t = t - 1; // Error received, retry this specific tag
-          Serial.print(response);
-          delay(10); 
+      String response;
+      while (millis() - startTime < 1000 &&
+             response.indexOf("+ANCHOR_RCV=") == -1) {
+        if (Serial2.available() > 0) {
+          response += Serial2.readString();
+        } else {
+          delay(2);
         }
-      } 
-      else {
-        t = t - 1; // Timeout occurred, retry this specific tag
       }
+
+      int receiveIndex = response.indexOf("+ANCHOR_RCV=");
+      int cmIndex = response.indexOf(" cm", receiveIndex);
+      int lastComma = response.lastIndexOf(',', cmIndex);
+
+      if (receiveIndex == -1 || cmIndex == -1 || lastComma == -1) {
+        Serial.printf("No valid range response from tag %s within 1000 ms. Module response: %s\n",
+                      tags[t].c_str(), response.c_str());
+        return;
+      }
+
+      String numStr = response.substring(lastComma + 1, cmIndex);
+      int datapoint = numStr.toInt();
+      
+      Serial.printf("%s,%d\n", tags[t].c_str(), max(datapoint + cal[t], 0)); 
     }
   }
   Serial.print("Test Complete");
